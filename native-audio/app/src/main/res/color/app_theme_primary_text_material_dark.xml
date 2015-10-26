@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<selector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:enterFadeDuration="0"
+    android:exitFadeDuration="200"
+    tools:ignore="UnusedAttribute">
+
+    <item android:state_enabled="false" android:alpha="@dimen/app_theme_disabled_button_alpha" android:color="@color/app_theme_primary_text_default_material_dark" />
+    <item android:color="@color/primary_text_default_material_dark" />
+</selector>

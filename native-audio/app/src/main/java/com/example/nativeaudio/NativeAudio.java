@@ -16,49 +16,55 @@
 
 package com.example.nativeaudio;
 
-import android.annotation.TargetApi;
-import android.app.Activity;
+import android.Manifest;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.content.res.AssetManager;
 import android.media.AudioManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.support.annotation.NonNull;
+import android.support.v4.app.ActivityCompat;
+import android.support.v4.content.ContextCompat;
+import android.support.v7.app.AppCompatActivity;
 import android.view.View;
 import android.view.View.OnClickListener;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
-import android.widget.Button;
 import android.widget.SeekBar;
 import android.widget.SeekBar.OnSeekBarChangeListener;
 import android.widget.Spinner;
 import android.widget.Toast;
 
-public class NativeAudio extends Activity {
+public class NativeAudio extends AppCompatActivity {
 
-    //static final String TAG = "NativeAudio";
+    /* Load jni .so library on initialization */
+    static {
+        System.loadLibrary("native-audio-jni");
+    }
 
-    static final int CLIP_NONE = 0;
-    static final int CLIP_HELLO = 1;
-    static final int CLIP_ANDROID = 2;
-    static final int CLIP_SAWTOOTH = 3;
-    static final int CLIP_PLAYBACK = 4;
+    private static final int PERMISSION_REQUEST_RECORD = 1;
+    private static final int PERMISSION_REQUEST_REVERB = 2;
 
-    static String URI;
-    static AssetManager assetManager;
+    private static final int CLIP_NONE = 0;
+    private static final int CLIP_HELLO = 1;
+    private static final int CLIP_ANDROID = 2;
+    private static final int CLIP_SAWTOOTH = 3;
+    private static final int CLIP_PLAYBACK = 4;
 
-    static boolean isPlayingAsset = false;
-    static boolean isPlayingUri = false;
+    private static String mUri;
+    private static AssetManager mAssetManager;
+    private static boolean mIsPlayingAsset = false;
+    private static int mNumChannelsUri = 0;
+    private boolean mCreatedAudioRecorder = false;
+    private boolean mReverbEnabled = false;
 
-    static int numChannelsUri = 0;
-
-    /** Called when the activity is first created. */
     @Override
-    @TargetApi(17)
     protected void onCreate(Bundle icicle) {
         super.onCreate(icicle);
         setContentView(R.layout.main);
 
-        assetManager = getAssets();
+        mAssetManager = getAssets();
 
         // initialize native audio system
         createEngine();
@@ -71,7 +77,7 @@ public class NativeAudio extends Activity {
          * IF we do not have a fast audio path, we pass 0 for sampleRate, which will force native
          * side to pick up the 8Khz sample rate.
          */
-        if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
             AudioManager myAudioMgr = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
             String nativeParam = myAudioMgr.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE);
             sampleRate = Integer.parseInt(nativeParam);
@@ -82,167 +88,177 @@ public class NativeAudio extends Activity {
 
         // initialize URI spinner
         Spinner uriSpinner = (Spinner) findViewById(R.id.uri_spinner);
-        ArrayAdapter<CharSequence> uriAdapter = ArrayAdapter.createFromResource(
-                this, R.array.uri_spinner_array, android.R.layout.simple_spinner_item);
+        ArrayAdapter<CharSequence> uriAdapter = ArrayAdapter.createFromResource(this, R.array.uri_spinner_array,
+                android.R.layout.simple_spinner_item);
         uriAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         uriSpinner.setAdapter(uriAdapter);
         uriSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-
             public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
-                URI = parent.getItemAtPosition(pos).toString();
+                mUri = parent.getItemAtPosition(pos).toString();
             }
 
             public void onNothingSelected(AdapterView parent) {
-                URI = null;
+                mUri = null;
             }
-
         });
 
         // initialize button click handlers
-
-        ((Button) findViewById(R.id.hello)).setOnClickListener(new OnClickListener() {
+        findViewById(R.id.hello).setOnClickListener(new OnClickListener() {
             public void onClick(View view) {
                 // ignore the return value
                 selectClip(CLIP_HELLO, 5);
             }
         });
 
-        ((Button) findViewById(R.id.android)).setOnClickListener(new OnClickListener() {
+        findViewById(R.id.android).setOnClickListener(new OnClickListener() {
             public void onClick(View view) {
                 // ignore the return value
                 selectClip(CLIP_ANDROID, 7);
             }
         });
 
-        ((Button) findViewById(R.id.sawtooth)).setOnClickListener(new OnClickListener() {
+        findViewById(R.id.sawtooth).setOnClickListener(new OnClickListener() {
             public void onClick(View view) {
                 // ignore the return value
                 selectClip(CLIP_SAWTOOTH, 1);
             }
         });
 
-        ((Button) findViewById(R.id.reverb)).setOnClickListener(new OnClickListener() {
-            boolean enabled = false;
+        findViewById(R.id.reverb).setOnClickListener(new OnClickListener() {
             public void onClick(View view) {
-                enabled = !enabled;
-                if (!enableReverb(enabled)) {
-                    enabled = !enabled;
+                int permissionCheck = ContextCompat.checkSelfPermission(NativeAudio.this, Manifest.permission.MODIFY_AUDIO_SETTINGS);
+                if (permissionCheck != PackageManager.PERMISSION_GRANTED) {
+                    ActivityCompat.requestPermissions(NativeAudio.this, new String[] {
+                        Manifest.permission.MODIFY_AUDIO_SETTINGS
+                    }, PERMISSION_REQUEST_REVERB);
+                    return;
                 }
+
+                continueToAudioReverb();
             }
         });
 
-        ((Button) findViewById(R.id.embedded_soundtrack)).setOnClickListener(new OnClickListener() {
+        findViewById(R.id.embedded_soundtrack).setOnClickListener(new OnClickListener() {
             boolean created = false;
+
             public void onClick(View view) {
                 if (!created) {
-                    created = createAssetAudioPlayer(assetManager, "background.mp3");
+                    created = createAssetAudioPlayer(mAssetManager, "background.mp3");
                 }
                 if (created) {
-                    isPlayingAsset = !isPlayingAsset;
-                    setPlayingAssetAudioPlayer(isPlayingAsset);
+                    mIsPlayingAsset = !mIsPlayingAsset;
+                    setPlayingAssetAudioPlayer(mIsPlayingAsset);
                 }
             }
         });
 
-        ((Button) findViewById(R.id.uri_soundtrack)).setOnClickListener(new OnClickListener() {
+        findViewById(R.id.uri_soundtrack).setOnClickListener(new OnClickListener() {
             boolean created = false;
+
             public void onClick(View view) {
-                if (!created && URI != null) {
-                    created = createUriAudioPlayer(URI);
+                if (!created && mUri != null) {
+                    created = createUriAudioPlayer(mUri);
                 }
-             }
+            }
         });
 
-        ((Button) findViewById(R.id.pause_uri)).setOnClickListener(new OnClickListener() {
+        findViewById(R.id.pause_uri).setOnClickListener(new OnClickListener() {
             public void onClick(View view) {
                 setPlayingUriAudioPlayer(false);
-             }
+            }
         });
 
-        ((Button) findViewById(R.id.play_uri)).setOnClickListener(new OnClickListener() {
+        findViewById(R.id.play_uri).setOnClickListener(new OnClickListener() {
             public void onClick(View view) {
                 setPlayingUriAudioPlayer(true);
-             }
+            }
         });
 
-        ((Button) findViewById(R.id.loop_uri)).setOnClickListener(new OnClickListener() {
+        findViewById(R.id.loop_uri).setOnClickListener(new OnClickListener() {
             boolean isLooping = false;
+
             public void onClick(View view) {
                 isLooping = !isLooping;
                 setLoopingUriAudioPlayer(isLooping);
-             }
+            }
         });
 
-        ((Button) findViewById(R.id.mute_left_uri)).setOnClickListener(new OnClickListener() {
+        findViewById(R.id.mute_left_uri).setOnClickListener(new OnClickListener() {
             boolean muted = false;
+
             public void onClick(View view) {
                 muted = !muted;
                 setChannelMuteUriAudioPlayer(0, muted);
-             }
+            }
         });
 
-        ((Button) findViewById(R.id.mute_right_uri)).setOnClickListener(new OnClickListener() {
+        findViewById(R.id.mute_right_uri).setOnClickListener(new OnClickListener() {
             boolean muted = false;
+
             public void onClick(View view) {
                 muted = !muted;
                 setChannelMuteUriAudioPlayer(1, muted);
-             }
+            }
         });
 
-        ((Button) findViewById(R.id.solo_left_uri)).setOnClickListener(new OnClickListener() {
+        findViewById(R.id.solo_left_uri).setOnClickListener(new OnClickListener() {
             boolean soloed = false;
+
             public void onClick(View view) {
                 soloed = !soloed;
                 setChannelSoloUriAudioPlayer(0, soloed);
-             }
+            }
         });
 
-        ((Button) findViewById(R.id.solo_right_uri)).setOnClickListener(new OnClickListener() {
+        findViewById(R.id.solo_right_uri).setOnClickListener(new OnClickListener() {
             boolean soloed = false;
+
             public void onClick(View view) {
                 soloed = !soloed;
                 setChannelSoloUriAudioPlayer(1, soloed);
-             }
+            }
         });
 
-        ((Button) findViewById(R.id.mute_uri)).setOnClickListener(new OnClickListener() {
+        findViewById(R.id.mute_uri).setOnClickListener(new OnClickListener() {
             boolean muted = false;
+
             public void onClick(View view) {
                 muted = !muted;
                 setMuteUriAudioPlayer(muted);
-             }
+            }
         });
 
-        ((Button) findViewById(R.id.enable_stereo_position_uri)).setOnClickListener(
-                new OnClickListener() {
+        findViewById(R.id.enable_stereo_position_uri).setOnClickListener(new OnClickListener() {
             boolean enabled = false;
+
             public void onClick(View view) {
                 enabled = !enabled;
                 enableStereoPositionUriAudioPlayer(enabled);
-             }
+            }
         });
 
-        ((Button) findViewById(R.id.channels_uri)).setOnClickListener(new OnClickListener() {
+        findViewById(R.id.channels_uri).setOnClickListener(new OnClickListener() {
             public void onClick(View view) {
-                if (numChannelsUri == 0) {
-                    numChannelsUri = getNumChannelsUriAudioPlayer();
+                if (mNumChannelsUri == 0) {
+                    mNumChannelsUri = getNumChannelsUriAudioPlayer();
                 }
-                Toast.makeText(NativeAudio.this, "Channels: " + numChannelsUri,
-                        Toast.LENGTH_SHORT).show();
-             }
+                Toast.makeText(NativeAudio.this, "Channels: " + mNumChannelsUri, Toast.LENGTH_SHORT).show();
+            }
         });
 
-        ((SeekBar) findViewById(R.id.volume_uri)).setOnSeekBarChangeListener(
-                new OnSeekBarChangeListener() {
+        ((SeekBar) findViewById(R.id.volume_uri)).setOnSeekBarChangeListener(new OnSeekBarChangeListener() {
             int lastProgress = 100;
+
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                 if (BuildConfig.DEBUG && !(progress >= 0 && progress <= 100)) {
                     throw new AssertionError();
                 }
                 lastProgress = progress;
             }
+
             public void onStartTrackingTouch(SeekBar seekBar) {
             }
+
             public void onStopTrackingTouch(SeekBar seekBar) {
                 int attenuation = 100 - lastProgress;
                 int millibel = attenuation * -50;
@@ -250,36 +266,40 @@ public class NativeAudio extends Activity {
             }
         });
 
-        ((SeekBar) findViewById(R.id.pan_uri)).setOnSeekBarChangeListener(
-                new OnSeekBarChangeListener() {
+        ((SeekBar) findViewById(R.id.pan_uri)).setOnSeekBarChangeListener(new OnSeekBarChangeListener() {
             int lastProgress = 100;
+
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                 if (BuildConfig.DEBUG && !(progress >= 0 && progress <= 100)) {
                     throw new AssertionError();
-                }               
+                }
                 lastProgress = progress;
             }
+
             public void onStartTrackingTouch(SeekBar seekBar) {
             }
+
             public void onStopTrackingTouch(SeekBar seekBar) {
                 int permille = (lastProgress - 50) * 20;
                 setStereoPositionUriAudioPlayer(permille);
             }
         });
 
-        ((Button) findViewById(R.id.record)).setOnClickListener(new OnClickListener() {
-            boolean created = false;
+        findViewById(R.id.record).setOnClickListener(new OnClickListener() {
             public void onClick(View view) {
-                if (!created) {
-                    created = createAudioRecorder();
+                int permissionCheck = ContextCompat.checkSelfPermission(NativeAudio.this, Manifest.permission.RECORD_AUDIO);
+                if (permissionCheck != PackageManager.PERMISSION_GRANTED) {
+                    ActivityCompat.requestPermissions(NativeAudio.this, new String[] {
+                        Manifest.permission.RECORD_AUDIO
+                    }, PERMISSION_REQUEST_RECORD);
+                    return;
                 }
-                if (created) {
-                    startRecording();
-                }
+
+                continueToAudioRecorderCreation();
             }
         });
 
-        ((Button) findViewById(R.id.playback)).setOnClickListener(new OnClickListener() {
+        findViewById(R.id.playback).setOnClickListener(new OnClickListener() {
             public void onClick(View view) {
                 // ignore the return value
                 selectClip(CLIP_PLAYBACK, 3);
@@ -288,52 +308,92 @@ public class NativeAudio extends Activity {
 
     }
 
-    /** Called when the activity is about to be destroyed. */
+    private void continueToAudioRecorderCreation() {
+        if (!mCreatedAudioRecorder) {
+            mCreatedAudioRecorder = createAudioRecorder();
+        }
+
+        if (mCreatedAudioRecorder) {
+            startRecording();
+        }
+    }
+
+    private void continueToAudioReverb() {
+        mReverbEnabled = !mReverbEnabled;
+        if (!enableReverb(mReverbEnabled)) {
+            mReverbEnabled = !mReverbEnabled;
+        }
+    }
+
     @Override
-    protected void onPause()
-    {
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        String permission = permissions[0];
+        int result = grantResults[0];
+
+        if (permission.equals(Manifest.permission.RECORD_AUDIO) && result == PackageManager.PERMISSION_GRANTED
+                && requestCode == PERMISSION_REQUEST_RECORD) {
+            continueToAudioRecorderCreation();
+        } else if (permission.equals(Manifest.permission.MODIFY_AUDIO_SETTINGS) && result == PackageManager.PERMISSION_GRANTED
+                && requestCode == PERMISSION_REQUEST_REVERB) {
+            continueToAudioReverb();
+        }
+    }
+
+    @Override
+    protected void onPause() {
         // turn off all audio
         selectClip(CLIP_NONE, 0);
-        isPlayingAsset = false;
+        mIsPlayingAsset = false;
         setPlayingAssetAudioPlayer(false);
-        isPlayingUri = false;
         setPlayingUriAudioPlayer(false);
         super.onPause();
     }
 
-    /** Called when the activity is about to be destroyed. */
     @Override
-    protected void onDestroy()
-    {
+    protected void onDestroy() {
         shutdown();
         super.onDestroy();
     }
 
-    /** Native methods, implemented in jni folder */
-    public static native void createEngine();
-    public static native void createBufferQueueAudioPlayer(int sampleRate, int samplesPerBuf);
-    public static native boolean createAssetAudioPlayer(AssetManager assetManager, String filename);
-    // true == PLAYING, false == PAUSED
-    public static native void setPlayingAssetAudioPlayer(boolean isPlaying);
-    public static native boolean createUriAudioPlayer(String uri);
-    public static native void setPlayingUriAudioPlayer(boolean isPlaying);
-    public static native void setLoopingUriAudioPlayer(boolean isLooping);
-    public static native void setChannelMuteUriAudioPlayer(int chan, boolean mute);
-    public static native void setChannelSoloUriAudioPlayer(int chan, boolean solo);
-    public static native int getNumChannelsUriAudioPlayer();
-    public static native void setVolumeUriAudioPlayer(int millibel);
-    public static native void setMuteUriAudioPlayer(boolean mute);
-    public static native void enableStereoPositionUriAudioPlayer(boolean enable);
-    public static native void setStereoPositionUriAudioPlayer(int permille);
-    public static native boolean selectClip(int which, int count);
-    public static native boolean enableReverb(boolean enabled);
-    public static native boolean createAudioRecorder();
-    public static native void startRecording();
-    public static native void shutdown();
+    /* Native methods, implemented in JNI folder */
 
-    /** Load jni .so on initialization */
-    static {
-         System.loadLibrary("native-audio-jni");
-    }
+    public static native void createEngine();
+
+    public static native void createBufferQueueAudioPlayer(int sampleRate, int samplesPerBuf);
+
+    public static native boolean createAssetAudioPlayer(AssetManager assetManager, String filename);
+
+    public static native void setPlayingAssetAudioPlayer(boolean isPlaying); // true == PLAYING, false == PAUSED
+
+    public static native boolean createUriAudioPlayer(String uri);
+
+    public static native void setPlayingUriAudioPlayer(boolean isPlaying);
+
+    public static native void setLoopingUriAudioPlayer(boolean isLooping);
+
+    public static native void setChannelMuteUriAudioPlayer(int chan, boolean mute);
+
+    public static native void setChannelSoloUriAudioPlayer(int chan, boolean solo);
+
+    public static native int getNumChannelsUriAudioPlayer();
+
+    public static native void setVolumeUriAudioPlayer(int millibel);
+
+    public static native void setMuteUriAudioPlayer(boolean mute);
+
+    public static native void enableStereoPositionUriAudioPlayer(boolean enable);
+
+    public static native void setStereoPositionUriAudioPlayer(int permille);
+
+    public static native boolean selectClip(int which, int count);
+
+    public static native boolean enableReverb(boolean enabled);
+
+    public static native boolean createAudioRecorder();
+
+    public static native void startRecording();
+
+    public static native void shutdown();
 
 }
